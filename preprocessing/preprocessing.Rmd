@@ -1,0 +1,280 @@
+---
+title: "House Price Prediction"
+date: ""
+output:
+  pdf_document: default
+  html_document: default
+subtitle: "Preprocessing data in R"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", cache = TRUE)
+```
+
+
+
+https://thinkr.fr/donnees-manquantes-causes-identification-et-imputation/#Les_differentes_strategies_d%E2%80%99imputation
+
+
+
+
+# 1. Préliminaires
+
+## A- Charger et "runner" les packages suivants :
+
+
+
+
+```{r packages, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(caret)
+library(GGally)
+library(lattice)
+library(corrplot)
+library(factoextra)
+library(FactoMineR)
+library(magrittr)
+library(RANN)
+theme_set(theme_bw())
+set.seed(181019)
+```
+
+## B- Télécharger vos données brutes et en faire une copie
+
+Par exemple : 
+
+```{r,message=FALSE,eval=FALSE,echo=FALSE}
+
+# efface la memoire
+rm()
+data = readr::read_csv("rawdata.csv")
+data = as.data.frame(data)
+
+
+# nombre de données manquantes 7000
+ # table(is.na(data))
+```
+
+
+
+
+
+
+
+
+## C- On supprime les colonnes qui ont trop de données manquantes (NA)
+
+Par exemple : 
+
+On supprime tout d'abord les colonnes (on exclut la target Y et la colonne Id si il y en a une) contenant trop de données manquantes ( appelées NA), c'est-à-dire ici les colonnes qui ont plus de  40% de données manquantes ( "missing thresold> 40%").
+
+```{r missing}
+
+#  On fixe un seuil de 40%
+missing_threshold = 0.4
+
+# On fait la  liste des prédicteurs (variables explicatives qui ont plus de 4O% de données NA, on supprime la colonne Id et la target Saleprice
+is_too_scarce = map_lgl(subset(data,select=c( -Id,-SalePrice)), ~mean(is.na(.x)) > missing_threshold)
+
+
+# On prend l'ensemble complémentaire : c'est-à-dire les colonnes qui ont moins de 40% de NA
+not_too_scarce = names(is_too_scarce)[!is_too_scarce]
+
+
+# On rajoute  maintenat la target (ici SalePrice)
+not_too_scarce2 = c(not_too_scarce,"SalePrice")
+
+# On selectionne/garde que ces colonnes et on en fait un dataframe
+train = subset(data, select=not_too_scarce2)
+train = as.data.frame(train)
+
+# nombre de données manquantes 868
+dim(train)
+table(is.na(train))
+```
+
+
+
+
+
+
+
+
+## D- Transformation de la nature de certaines variables
+
+Les variables facteurs ont été déclarées comme character.
+
+```{r}
+# identifions les  variables facteurs ont été déclarées comme character.
+datab=select_if(train,is.character)
+Names=names(datab)
+# nombre de données manquantes de 868 dont 520 de type chr 
+table(is.na(train))
+table(is.na(datab))
+```
+
+
+
+
+```{r}
+
+
+# transformons d'un coup toutes ces variables en  facteur
+train[,Names]=lapply(train[,Names], as.factor)
+
+ # str(train)
+```
+
+
+
+
+
+# 2. On remplace par le mode les NA pour les variables catégorielles
+
+
+
+
+
+
+
+```{r imputation}
+
+name_cat <-
+  train %>%
+  discard(is.numeric) %>%
+  colnames()
+
+for(col in name_cat){
+  mode <- names(which.max(table(train[col])))
+  train[is.na(train[col]), col] <- mode
+}
+
+# nombre de données manquantes restantes quantitatives
+table(is.na(train))
+```
+
+
+
+
+
+
+# 3. On applique les k plus proches voisins pour les données manquantes restantes quantitatives
+
+
+
+
+
+```{r message=FALSE}
+library(VIM)
+```
+
+
+
+
+
+```{r imputation continuous pred}
+
+# on retire la target
+imputedData = subset(train, select=c(-SalePrice))
+
+trainTrans=kNN(imputedData)
+dim(trainTrans)
+
+# Suppression des dernière colonnes creer qui ne servent à rien
+
+trainTrans=trainTrans %>% select(!ends_with("_imp"))
+
+# ajout de la target
+trainTrans=cbind.data.frame(trainTrans,subset(train, select=c(SalePrice)))
+
+names(trainTrans)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+### Création du fichier transformer en .csv
+
+
+
+
+Soit on s'arrete la et on efface la mémoire, sinon ne pas effacer et passrr à l'étape suivante (découpage train/test).  Pour vous cette partie a déjà été faite.
+
+
+```{r}
+write_csv(trainTrans,'trainTrans.csv')
+```
+
+
+
+```{r}
+rm()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 4. Découpage train/test Partition train/test
+
+```{r}
+
+# Intitialiser la graine
+
+
+set.seed(1) 
+
+# Imaginons ici que votre jeu de données à la première ligne est votre jeu de données complet
+#  75%  pour le train, 25% pour le test
+
+sample = sample.int(n = nrow(trainTrans), size = floor(.75*nrow(trainTrans)), replace = F)
+train = trainTrans[sample, ]
+test = trainTrans[-sample, ]
+
+
+
+```
+
+
+
+## Création du fichier transformer en .csv
+
+
+```{r}
+write_csv(train,'train.csv')
+```
+
+
+```{r}
+write_csv(test,'test.csv')
+```
+
+```{r}
+rm()
+```
+
+
+
+
+
