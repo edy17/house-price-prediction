@@ -1,0 +1,726 @@
+---
+title: "Prédiction des prix des maisons"
+subtitle : "Techniques de régression basiques en R"
+author : 'EDY DIEHL TD'
+
+output: pdf_document
+geometry: "top=1cm"
+header-includes:
+   - \usepackage{pifont}
+   - \usepackage{manfnt}
+   - \usepackage{mdframed}
+   - \usepackage{systeme}
+   - \usepackage{txfonts}
+   - \newcommand{\cH}{\mathcal{H}}
+---
+
+\tableofcontents
+
+\newpage
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# 1. Introduction
+
+Le but de ce projet est de manipuler un échantillon de données afin d'entrainer un modèle qui prédit le prix de vente des maisons à Ames, dans l'état d'Iowa aux USA. Nous pouvons sélectionner parmi 75 variables, celles qui ont un pouvoir d'influence important sur le prix de vente. Le jeu de données contient les prix de vente observés pour 1095 maisons construites entre 1872 et 2010.
+
+La variable à prédire est "SalePrice" qui correspond au prix de vente d'une maison.
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+#Afin de réaliser le projet, nous devons tout d'abord installer les librairies requises.
+library(MASS);library(knitr);library(ggplot2)
+library(cowplot);library(reshape2);library(dplyr)
+library(GGally);library(corrplot);library(carData)
+library(car);library(questionr);library(multcomp)
+library(dplyr);library(leaps);library(tidyverse)
+library(STAT);library(ggcorrplot);library(randomForest)
+library(rgeos);library(dplyr);library(caret);library(party)
+library(kableExtra);library(fitdistrplus);library(pander);library(Metrics)
+library(gridExtra);library(tidytable);library(RColorBrewer);
+library(caret);library(glmnet);library(mlbench);library(psych);
+```
+
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+#Il est important d'effacer toutes variables dans l'environment d'exécution avant de commencer les traitements.
+rm(list = ls())
+```
+
+
+Nous importons les fichiers contenant les jeux de données d'entrainement et de test ("Train.csv" et "Test.csv") et fixons la graine aléatoire afin de pouvoir comparer nos résultats.
+
+```{r}
+set.seed(2010)
+train <- read.csv("Train.csv", header = TRUE)
+test <- read.csv("Test.csv", header = TRUE)
+dim(train)
+dim(test)
+str(train)
+```
+
+Nous nous assurons que les jeux de données d'entrainement et de test contiennent les mêmes variables.
+
+```{r}
+train_columns <- names(train)
+test_columns <- names(test)
+
+dif_train_test <- train_columns[which(!(train_columns %in% test_columns))]
+dif_test_train <- test_columns[which(!(test_columns %in% train_columns))]
+
+dif_train_test
+dif_test_train
+
+rm(dif_train_test, dif_test_train)
+```
+
+
+
+# 2. Analyse exploratoire des données et modélisation
+
+
+## 2.1. Etude de la  distribution de la variable cible
+
+Affichons les statistiques sommaires de la variable SalePrice.
+
+Variance et écart type :
+
+```{r}
+print(var(train$SalePrice))
+print(sd(train$SalePrice))
+```
+
+Min,max, médiane, quantiles, moyenne:
+
+```{r}
+pander(summary(train$SalePrice))
+```
+
+
+Affichons des graphiques descriptives de la variable SalePrice.
+
+```{r, out.width = "50%", fig.align = "center"}
+# Histogramme
+ggplot(train) +
+  aes(x = SalePrice) +
+  geom_histogram(bins = 30L, fill = "green") +
+  theme_minimal() +
+  scale_x_continuous(labels = scales::label_number_si())
+
+# Densité de probabilté
+ggplot(train) +
+  aes(x = SalePrice) +
+  geom_density(fill = "green") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::label_number_si())
+
+# Boite à moustache
+ggplot(train) +
+  aes(y = SalePrice) +
+  geom_boxplot(fill = "green") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::label_number_si())
+```
+
+
+
+La distribution de la variable SalePrice semble asymétrique, ce qui pourrait réduire les effets d'une regression. Nous pouvons utiliser le diagramme de Cullen-Frey pour mieux étudier cette distribution, en la comparant à d'autres lois usuelles.
+
+```{r, out.width = "75%", fig.align = "center"}
+descdist(train$SalePrice, discrete = FALSE, boot = 100)
+```
+
+
+Le point bleu du graphique ci-dessous représente la distribution de la variable SalePrice qui est très proche de la loi log-normale.
+Une variable suivant une loi log-normale suit une loi normale par application du logarithme. La loi normale étant parfaitement symétrique, l'utilisation du logarithme de notre variable nous garantirait de meilleurs effets sur une regression.
+
+Démontrons que notre variable SalePrice ne suit pas une loi normale par un test de Shapiro-Wilk.
+
+```{r}
+shapiro.test(train$SalePrice)
+```
+
+La p-value de ce test est très faible (2.2e-16 < 5%), nous rejetons ainsi le caractère gaussien de la distribution de la variable SalePrice.
+
+
+Nous pouvons appliquer le logarithme sur notre variable SalePrice pour la rapprocher de la loi normale.
+
+Comparons graphiquement la loi normale à la distribution du logarithme de notre variable cible.
+
+```{r, out.width = "70%", message=FALSE, fig.align = "center"}
+plot(fitdist(log(train$SalePrice), "norm"))
+```
+
+Ainsi, le logarithme de la variable SalePrice est très proche d'une loi log-normale. Nous considérerons donc le logarithme de cette variable dans notre regression.
+
+
+## 2.2. Etude de la distribution des variables indépendantes
+
+
+### 2.2.1. Analyse des données quantitatives <br/>
+
+Extrayons les variables quantitatives de notre jeu de données.
+
+```{r}
+train_numerical <- train %>% select_if(is.numeric)
+test_numerical <- test %>% select_if(is.numeric)
+
+dim(train_numerical)
+
+dim(test_numerical)
+```
+
+Observons les histogrammes des variables quantitatives pour avoir l'allure de leur distribution.
+
+Histogrammes pour le train :
+
+```{r, fig.width = 15, fig.height=20, out.width = "100%", out.height = "160%"}
+p <- list()
+i <- 1
+for (col in names(train_numerical)) {
+  p[[i]] <- ggplot(train_numerical, aes_string(x = col)) + geom_histogram(bins = 30L, fill = "green")
+  i <- i + 1
+}
+do.call("grid.arrange", c(p, nrow = 10, ncol = 5))
+rm(p, i, col)
+```
+
+
+Histogrammes pour le test :
+
+```{r, fig.width = 15, fig.height=20, out.width = "100%", out.height = "160%"}
+p <- list()
+i <- 1
+for (col in names(test_numerical)) {
+  p[[i]] <- ggplot(test_numerical, aes_string(x = col)) + geom_histogram(bins = 30L, fill = "purple")
+  i <- i + 1
+}
+do.call("grid.arrange", c(p, nrow = 10, ncol = 5))
+rm(p, i, col)
+```
+
+
+Les résultats des graphiques ci-dessus indiquent que les deux échantillons (train et test) proviennent de la même population étant donné que leurs distributions suivent la même allure. Cependant, certaines variables semblent très constantes par rapport à la variable cible, examinons-les plus en détail.
+
+
+#### 2.2.1.a. Mise à l'écart de variable quantitative constante <br/>
+
+
+Sélectionnons les variables quantitatives avec une variance très faible.
+
+```{r}
+variances <- apply(train_numerical, 2, var)
+constant_var_list <- names(variances[which(variances <= 0.1)])
+constant_var_list
+```
+
+Compte tenu de la variance élevée de notre variable cible (variance, min max, mean). Nous supprimons ces variables quantitatives presque constante des variables à considérer pour notre regression.
+
+```{r}
+train_numerical <- train_numerical[, !(names(train_numerical) %in% constant_var_list)]
+test_numerical <- test_numerical[, !(names(test_numerical) %in% constant_var_list)]
+dim(train_numerical)
+dim(test_numerical)
+```
+
+
+#### 2.2.1.b. Etude des relations entre les variables indépendantes et la variable cible <br/>
+
+
+À partir de l'année de vente d'une maison (variable YrSold), nous créons les nouvelles variables qui définissent
+l'age de construction de la maison, l'age de la renovation et lage de construction du garage en fonction des années spécifiques.
+
+
+```{r}
+train_numerical$Age_Maison <- with(train_numerical, train_numerical$YrSold - YearBuilt)
+train_numerical$Age_Depuis_Reno <- with(train_numerical, train_numerical$YrSold - YearRemodAdd)
+train_numerical$Age_Garage <- with(train_numerical, train_numerical$YrSold - GarageYrBlt)
+
+test_numerical$Age_Maison <- with(test_numerical, test_numerical$YrSold - YearBuilt)
+test_numerical$Age_Depuis_Reno <- with(test_numerical, test_numerical$YrSold - YearRemodAdd)
+test_numerical$Age_Garage <- with(test_numerical, test_numerical$YrSold - GarageYrBlt)
+
+train_numerical <- select(train_numerical, -YearBuilt)
+train_numerical <- select(train_numerical, -YearRemodAdd)
+train_numerical <- select(train_numerical, -GarageYrBlt)
+
+test_numerical <- select(test_numerical, -YearBuilt)
+test_numerical <- select(test_numerical, -YearRemodAdd)
+test_numerical <- select(test_numerical, -GarageYrBlt)
+
+#Deplacement de la colonne SalePrice à la fin de chaque data frame
+train_numerical <- select(train_numerical, -SalePrice)
+test_numerical <- select(test_numerical, -SalePrice)
+train_numerical$SalePrice <- train$SalePrice
+test_numerical$SalePrice <- test$SalePrice
+
+print("YrSold" %in% names(train_numerical))
+print("YearBuilt" %in% names(train_numerical))
+print("YearRemodAdd" %in% names(train_numerical))
+print("GarageYrBlt" %in% names(train_numerical))
+
+print("YrSold" %in% names(test_numerical))
+print("YearBuilt" %in% names(test_numerical))
+print("YearRemodAdd" %in% names(test_numerical))
+print("GarageYrBlt" %in% names(test_numerical))
+```
+
+
+Evaluons la corrélation des variables indépendantes par rapport à la variable cible à partir d'une matrice de corrélation.
+Ce tableau nous donne un aperçu des variables fortement corrélées à la variable cible et qui seront importantes pour notre regression.
+
+```{r, fig.width = 15, fig.height=15, out.width = "100%", out.height="70%"}
+correlation <- list()
+abs_correlation <- list()
+for (col in names(train_numerical)) {
+  correlation[col] <- cor(train_numerical[col], train_numerical$SalePrice)
+  abs_correlation[col] <- abs(cor(train_numerical[col], train_numerical$SalePrice))
+}
+# considered_correlation <- names(abs_correlation[which(abs_correlation >= 0.3)])
+considered_correlation <- names(abs_correlation)
+
+considered_train_numerical <- train_numerical[, (names(train_numerical) %in% considered_correlation)]
+
+corr_mat <- round(cor(considered_train_numerical), 2)
+# reduce the size of correlation matrix
+melted_corr_mat <- melt(corr_mat)
+
+ggplot(data = melted_corr_mat, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  geom_text(aes(Var2, Var1, label = value), color = "black", size = 4) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+rm(corr_mat, melted_corr_mat)
+```
+
+
+Evaluons la corrélation des variables indépendantes par rapport à la variable cible à partir d'un nuage de point et une droite de corrélation linéaire.
+
+```{r, fig.width = 15, fig.height=25, out.width = "100%", out.height = "150%"}
+p <- list()
+i <- 1
+for (col in names(train_numerical)) {
+  p[[i]] <- ggplot(train_numerical, aes_string(x = col, y = 'SalePrice')) +
+    geom_point(color = 'red') +
+    stat_smooth(method = lm, formula = 'y ~ x')
+  i <- i + 1
+}
+do.call("grid.arrange", c(p, nrow = 10, ncol = 4))
+rm(p, i, col)
+```
+
+
+Procédons à la mise à l'échelle des variables indépendantes. La mise à l'échelle est un moyen de comparer des données qui ne sont pas mesurées de la même manière. Dans la mise à l'échelle standard, également connue sous le nom de normalisation des valeurs, nous mettons à l'échelle les valeurs des données de sorte que le résumé statistique global de chaque variable ait une valeur moyenne de zéro et une valeur de variance unitaire. Nous écartons la variable cible à cette étape pour la normaliser à partir d'un logarithme.
+
+```{r}
+train_numeric <- select(train_numerical, -SalePrice)
+test_numeric <- select(test_numerical, -SalePrice)
+
+train_numeric <- as.data.frame(scale(train_numeric))
+test_numeric <- as.data.frame(scale(test_numeric))
+
+train_numeric$SalePrice <- train$SalePrice
+test_numeric$SalePrice <- test$SalePrice
+
+dim(train_numeric)
+dim(test_numeric)
+print("SalePrice" %in% names(train_numeric))
+print("SalePrice" %in% names(test_numeric))
+```
+
+
+### 2.2.2. Analyse des données qualitatives <br/>
+
+Extrayons les variables qualitatives de notre jeu de données.
+
+```{r}
+train_cathegorical <- train %>% select_if(Negate(is.numeric))
+test_cathegorical <- test %>% select_if(Negate(is.numeric))
+
+dim(train_cathegorical)
+dim(test_cathegorical)
+```
+
+
+Observons les variables qualitatives à partir de diagramme en baton et vérifions si certaines de ces variables sont quasi constantes (dominées par l'une de leurs modalités)
+
+```{r, fig.width = 15, fig.height = 25, out.width = "100%", out.height = "150%"}
+p <- list()
+i <- 1
+mycolors <- colorRampPalette(brewer.pal(9, "Set1"))(25)
+for (col in names(train_cathegorical)) {
+  p[[i]] <- ggplot(train_cathegorical, aes_string(x = col, fill = col)) +
+    geom_bar() +
+    scale_fill_manual(values = mycolors) +
+    theme(legend.position = "none") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+  i <- i + 1
+}
+do.call("grid.arrange", c(p, nrow = 20, ncol = 2))
+rm(p, i, col, mycolors)
+```
+
+
+D'après le graphique ci-dessus, on remarque facilement que certaines des variables sont quasi constantes, nous les sélectionnons pour les supprimer des jeux de données.
+
+```{r}
+to_drop <- c('MSZoning', 'Street', 'LandContour', 'Utilities', 'LotConfig', 'LandSlope',
+             'Condition1', 'Condition2', 'BldgType', 'RoofMatl', 'RoofStyle', 'ExterCond',
+             'BsmtCond', 'BsmtFinType2', 'Heating', 'CentralAir', 'Electrical', 'Functional',
+             'GarageQual', 'GarageCond', 'PavedDrive', 'SaleType', 'SaleCondition')
+
+train_cathegorical <- train_cathegorical[, !(names(train_cathegorical) %in% to_drop)]
+test_cathegorical <- test_cathegorical[, !(names(test_cathegorical) %in% to_drop)]
+
+dim(train_cathegorical)
+dim(test_cathegorical)
+```
+
+
+Transformons les variables catégorielles en facteur pour faciliter la regression en permettant la conversion implicite en valeur numérique par les modules de regression.
+
+```{r}
+factor_names <- names(train_cathegorical)
+train_cathegorical[, factor_names] <- lapply(train_cathegorical[, factor_names], as.factor)
+test_cathegorical[, factor_names] <- lapply(test_cathegorical[, factor_names], as.factor)
+factor_names
+```
+
+
+
+# 3. Validité des modèles
+
+
+## 3.1. Implémentation d'un modèle de base
+
+
+Nous utilisons les variables numériques et les variables catégorielles pour former un seul jeu de données.
+
+
+```{r}
+train_final1 <- cbind(train_numeric, train_cathegorical)
+dim(train_final1)
+
+test_final1 <- cbind(test_numeric, test_cathegorical)
+dim(test_final1)
+```
+
+
+Implémentons un modèle de base et résumons-le.
+
+```{r, warning=FALSE}
+model0 <- lm(log(SalePrice) ~ ., data = train_final1)
+summary(model0)
+```
+
+
+Le modèle de base créé contient 2 variables non définies à cause des singularités. Ce qui signifie que ces variables ont des relations linéaires exactes avec d'autres variables. Ces variables non définies pourraient prédire des variables non définies. Nous devons donc améliorer le modèle pour éliminer ces variables.
+
+
+
+### 3.1.1. Amélioration du modèle de base par selection de variable pertinente  <br/>
+
+
+Implémentons un modèle Random Forest pour sélectionner les variables pertinentes pour notre regression.
+
+```{r, out.width = "50%", fig.align = "center"}
+model_tree0 <- randomForest(log(SalePrice) ~ ., data = train_final1)
+print(model_tree0)
+```
+
+
+Optimisons le modèle Random Forest en recherchant le paramètre optimale mtry
+
+```{r, out.width = "50%", fig.align = "center", warning=FALSE}
+t <- tuneRF(train_final1[, -50], log(train_final1$SalePrice), stepFactor = 0.5, plot = TRUE, ntreeTry = 500, trace = FALSE, improve = 0.05)
+```
+
+D'après le graphique ci-dessus, l'erreur OOB minimal est obtenu en testant environ 64 variables, soit 50 variables pour le maximum de notre dataset.
+
+Observons les variables les plus importantes pour notre prédiction et conservons-les dans un dataframe par odre d'importance.
+
+```{r, fig.width = 18, fig.height = 10, out.width = "100%", out.height = "90%", fig.align = "center", warning=FALSE}
+model_tree1 <- randomForest(log(SalePrice) ~ ., data = train_final1, ntree = 500, mtry = 50)
+varImpPlot(model_tree1, sort = T, n.var = 45, main = "Top 45 des meilleurs variables")
+train_result <- data.frame(variables = colnames(train_final1[1:49]), IncNodePurity = format(model_tree1$importance, scientific = F))
+train_result <- train_result[order(train_result$IncNodePurity, decreasing = TRUE),]
+```
+
+
+Nous sélectionnons les 42 meilleurs variables pour notre prédiction.
+
+```{r}
+selected_var <- train_result[1:42, 1]
+train_final11 <- train_final1[, c(selected_var, 'SalePrice')]
+test_final2 <- test_final1[, c(selected_var, 'SalePrice')]
+names(train_final11)
+```
+
+
+### 3.1.2. Amélioration du modèle de base par suppression de valeur aberrante <br/>
+
+Nous pouvons utiliser la distance de Cook pour identifier les valeurs aberrantes. La distance de Cook est une estimation de l'influence d'un point de données. Il prend en compte à la fois l'effet de levier et le résidu de chaque observation. La distance de Cook est un résumé de la variation d'un modèle de régression lorsque la ième observation est supprimée.
+
+Lorsque nous cherchons à voir quelles observations peuvent être des valeurs aberrantes, une règle générale consiste à étudier tout point supérieur à un seuil. Nous choisissons comme seuil les points supérieurs à 4 fois la moyenne de toutes les distances.
+
+Identifions les valeurs aberrantes.
+
+
+```{r, out.width = "50%", fig.align = "center", warning=FALSE}
+model1 <- lm(log(SalePrice) ~ ., data = train_final11)
+cooksD <- cooks.distance(model1)
+influential <- cooksD[(cooksD > (4 * mean(cooksD, na.rm = TRUE)))]
+influential
+```
+
+
+
+Implémentons notre modèle de regression de base avec nos variables finales sans les valeurs aberrantes, puis résumons-le.
+
+```{r, warning=FALSE}
+names_of_influential <- names(influential)
+outliers <- train_final11[names_of_influential,]
+train_final2 <- train_final11 %>% anti_join(outliers)
+model2 <- lm(log(SalePrice) ~ ., data = train_final2)
+summary(model2)
+```
+
+
+Le modèle de base obtenu a un coefficient de determination ajusté de 0.9381 ce qui semble correct pour une prédiction. Toutefois, il est nécessaire de valider les hypothèses d'une regression.
+
+
+### 3.1.3. Validation du modèle de base : Analyse des résidus <br/>
+
+Le modèle de base est validé s'il respecte 4 hypothèses : <br/>
+
+P1 : Les erreurs sont centrées / le modèle est linéaire ; <br/>
+P2 : Les erreurs ont une variance homoscédastique ; <br/>
+P3 : Les erreurs sont non corrélées ; <br/>
+P4 : Les erreurs sont gaussiennes. <br/>
+
+
+* Vérification de P1 :
+
+```{r}
+plot(model2, 1)
+```
+
+P1 est vérifiée si les résidus restent globalement uniformément répartis des deux côtés de 0. La ligne rouge est approximativement horizontale à zéro. Les résidus restent globalement uniformément répartis des deux côtés de 0. Le modèle vérifie donc P1.
+
+
+* Vérification de P2 :
+
+```{r}
+plot(model2, 3)
+```
+
+P2 est vérifiée si la courbe rouge est horizontale et les points sont uniformément répartis autour d'elle (Absence de tendance). Il est difficile de vérifier P2 à partir du graphique ci-dessus. Nous pouvons effectuer un test de Breush-Pagan pour vérifier l'homoscédasticité des résidus du modèle.
+
+Hypothèse H0 du test : "Homoscédasticité"
+
+```{r}
+ncvTest(model2)
+```
+
+P-value = 1.2425e-05 < 0.05, donc P2 n'est pas vérifiée pour un niveau de confiance de 95%.
+
+
+* Vérification de P3 :
+
+```{r}
+acf(residuals(model2), mail = "Plot Auto-correlation")
+```
+
+P3 est vérifiée si tous les traits verticaux, sauf le premier, ne dépasse pas les seuils en pointillés. P3 semble être verifier à partir du graphique ci-dessus. Nous pouvons effectuer un test de Durbin-Watson pour vérifier la non-corrélation des résidus du modèle.
+
+Hypothèse H0 du test : "Non-corrélation"
+
+```{r}
+durbinWatsonTest(model2)
+```
+
+P-value = 0.126 > 0.05, donc P3 est vérifiée pour un niveau de confiance de 95%.
+
+
+* Vérification de P4 :
+
+```{r}
+plot(model2, 2)
+```
+
+P4 est vérifiée si les erreurs sont gaussiennes. Les points doivent être alignés autour de la bissectrice. P4 ne semple pas être vérifié à partir du graphique ci-dessus. Nous pouvons effectuer un test de Shapiro pour vérifier le caractère gaussien des résidus du modèle.
+
+Hypothèse H0 du test : "Distribution gaussienne des résidus"
+
+```{r}
+shapiro.test(residuals((model2)))
+```
+
+P-value = 2.042e-12 < 0.05, donc P4 n'est pas vérifiée pour un niveau de confiance de 95%. <br/><br/>
+
+
+Les erreurs de notre modèle de base n'ont pas une variance homoscédastique et ne suivent pas une distribution gaussienne (P2 et P4 non validées). Notre modèle n'est donc pas validé pour une prédiction.
+
+
+## 3.2. Implémentation de nouveaux modèles
+
+
+* Validation croisée :
+
+Dans la plupart des applications, nous sommes moins préoccupés par la performance d'un modèle sur les données utilisées pour l'entraîner, et plus préoccupés par la façon dont il se généralisera à un ensemble de données indépendant. En d'autres termes, nous ne voulons généralement pas de modèles trop spécifiques à un échantillon particulier (sur-ajustement) car ces modèles ne nous aident pas réellement à expliquer le phénomène d'intérêt plus largement.
+
+La validation croisée est un outil permettant d'estimer les performances d'un modèle sur un échantillon indépendant. En R, le package caret nous permet d'entrainer des modèles en considérant des étapes de validation croisée. Définissons donc un objet indiquant que nos modèles seront évalués à l'aide de 5 répétitions de validation croisée 10 fois.
+
+```{r}
+custom <- trainControl(method = "repeatedcv", number = 10, repeats = 5, verboseIter = FALSE)
+```
+
+
+### 3.2.1. Régression pas à pas <br/>
+
+
+La régression pas à pas (ou sélection pas à pas) consiste à ajouter et à supprimer de manière itérative des prédicteurs, dans le modèle prédictif, afin de trouver le sous-ensemble de variables dans l'ensemble de données résultant en le modèle le plus performant, c'est-à-dire un modèle qui réduit l'erreur de prédiction.
+
+Il existe trois stratégies de régression pas à pas :
+** La régression Forward, qui commence sans aucun prédicteur dans le modèle, ajoute de manière itérative les prédicteurs les plus contributifs et s'arrête lorsque l'amélioration n'est plus statistiquement significative ;
+** La régression Backward (ou élimination en amont), qui commence avec tous les prédicteurs du modèle (modèle complet), supprime de manière itérative les prédicteurs les moins contributifs et s'arrête lorsque nous disposons d'un modèle dans lequel tous les prédicteurs sont statistiquement significatifs ;
+** La régression Both (ou remplacement séquentiel), qui est une combinaison de sélections avant et arrière.
+
+
+* Implémentons un modèle de regression Forward.
+
+```{r, warning=FALSE}
+tuneGrid <- data.frame(nvmax = 1:42)
+model_forward <- train(log(SalePrice) ~ ., data = train_final2, method = "leapForward", tuneGrid = tuneGrid,
+                       trControl = custom, verbose = FALSE)
+model_forward$bestTune
+```
+
+
+* Implémentons un modèle de regression Backward.
+
+```{r, warning=FALSE}
+model_backward <- train(log(SalePrice) ~ ., data = train_final2, method = "leapBackward", tuneGrid = tuneGrid,
+                        trControl = custom, verbose = FALSE)
+model_backward$bestTune
+```
+
+
+* Implémentons un modèle de regression Both.
+
+```{r, warning=FALSE}
+model_both <- train(log(SalePrice) ~ ., data = train_final2, method = "leapSeq",
+                    tuneGrid = tuneGrid, trControl = custom, verbose = FALSE)
+model_both$bestTune
+```
+
+
+
+
+### 3.2.2. Regression par régularisation <br/>
+
+L'algorithme de régression linéaire fonctionne en sélectionnant des coefficients pour chaque variable indépendante qui minimise une fonction de perte. Cependant, si les coefficients sont grands, ils peuvent conduire à un sur-ajustement sur l'ensemble de données d'apprentissage, un tel modèle ne se généralisera pas bien sur les données de test invisibles. Pour pallier cette lacune, nous pouvons faire de la régularisation, qui pénalise les gros coefficients. Il existe 3 familles de regression régularisé : Ridge, Lasso et Elastic Net.
+
+Pour estimer les modèles dans R, nous pouvons utiliser le package caret qui nous permet de configurer une grille de valeurs de régularisation alpha et lambda et effectuer une validation croisée pour trouver les valeurs de paramètre optimales.
+
+
+* Implémentons un modèle de regression Ridge :
+
+```{r, warning=FALSE}
+ridge <- train(log(SalePrice) ~ ., train_final2, method = 'glmnet', tuneGrid = expand.grid(alpha = 0, lambda = seq(0.0001, 1, length = 5)),
+               trControl = custom)
+ridge$bestTune
+```
+
+
+* Implémentons un modèle de regression Lasso :
+
+```{r, warning=FALSE}
+lasso <- train(log(SalePrice) ~ ., train_final2, method = 'glmnet',
+               tuneGrid = expand.grid(alpha = 1, lambda = seq(0.0001, 1, length = 5)), trControl = custom)
+lasso$bestTune
+```
+
+
+* Implémentons un modèle de regression Elastic Net :
+
+```{r, warning=FALSE}
+en <- train(log(SalePrice) ~ ., train_final2, method = 'glmnet',
+            tuneGrid = expand.grid(alpha = seq(0, 1, length = 10), lambda = seq(0.0001, 1, length = 5)), trControl = custom)
+en$bestTune
+```
+
+
+
+# 4. Modèle finale
+
+
+## 4.1. Comparaison des modèles
+
+
+```{r, warning=FALSE}
+model_list <- list(ModelForward = model_forward, ModelBackward = model_backward,
+                   ModelBoth = model_both, Ridge = ridge, Lasso = lasso, ElasticNet = en)
+res <- resamples(model_list)
+```
+
+
+```{r}
+summary(res)
+```
+
+
+## 4.1. Selection du modèle final
+
+
+Les différents modèles ayant des statistiques très proches, nous choisissons comme meilleur modèle, celui donc le RMSE minium est le plus bas.
+Il s'agit du modèle Lasso. Nous pouvons résumer les coefficients estimés comme suit :
+
+```{r}
+model_final <- lasso
+coef(model_final$finalModel, s = model_final$bestTune$lambda)
+```
+
+
+# 5. Calcul du RMSE
+
+Pour pouvoir prédire sur les données de test, nous devons remplacer les modalités absentes des données de test
+par les modalités les plus fréquentes des variables qualitatives.
+
+
+```{r}
+exterior1st_mode <- names(which.max(table(train_final2$Exterior1st)))
+exterior2nd_mode <- names(which.max(table(train_final2$Exterior2nd)))
+garageType_mode <- names(which.max(table(train_final2$GarageType)))
+foundation_mode <- names(which.max(table(train_final2$Foundation)))
+lotShape_mode <- names(which.max(table(train_final2$LotShape)))
+
+test_final2$Exterior1st[test_final2$Exterior1st == "BrkComm"] <- exterior1st_mode
+test_final2$Exterior1st[test_final2$Exterior1st == "CBlock"] <- exterior1st_mode
+test_final2$Exterior2nd[test_final2$Exterior2nd == "CBlock"] <- exterior2nd_mode
+test_final2$GarageType[test_final2$GarageType == "2Types"] <- garageType_mode
+test_final2$Foundation[test_final2$Foundation == "Wood"] <- foundation_mode
+test_final2$LotShape[test_final2$LotShape == "IR3"] <- lotShape_mode
+```
+
+
+Calculons les valeurs du RMSE sur le train et le test avec l'unité de base du SalePrice:
+
+* Prediction et calcul du RMSE sur les données de train
+
+```{r, warning=FALSE}
+RMSE_train <- rmse(train_final2$SalePrice, exp(predict(model_final, train_final2)))
+RMSE_train
+```
+
+* Prediction et calcul du RMSE sur les données de test
+
+```{r, warning=FALSE}
+RMSE_test <- rmse(test_final2$SalePrice, exp(predict(model_final, test_final2)))
+RMSE_test
+```
+
